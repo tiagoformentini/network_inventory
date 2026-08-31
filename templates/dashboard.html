@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title">Iniciar varredura</h5>
+    <form id="scan-form" class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label">Rede (CIDR)</label>
+        <input type="text" class="form-control" name="cidr" value="10.0.0.0/24">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Domínio (opcional)</label>
+        <input type="text" class="form-control" name="domain" placeholder="MEUDOMINIO">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Usuário admin</label>
+        <input type="text" class="form-control" name="username" placeholder="administrador">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Senha</label>
+        <input type="password" class="form-control" name="password">
+      </div>
+      <div class="col-12">
+        <button type="submit" class="btn btn-primary" id="scan-btn">Iniciar varredura</button>
+        <span id="scan-info" class="ms-3 text-muted"></span>
+      </div>
+    </form>
+    <div class="progress mt-3" style="height: 8px; display:none;" id="scan-progress-wrap">
+      <div class="progress-bar" id="scan-progress" role="progressbar" style="width: 0%"></div>
+    </div>
+    {% if scan_status.errors %}
+    <div class="alert alert-warning mt-3 small mb-0">
+      <strong>Falhas na última varredura:</strong>
+      <ul class="mb-0">
+        {% for err in scan_status.errors %}<li>{{ err }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0">Máquinas encontradas ({{ machines|length }})</h5>
+  <span class="small text-muted">
+    🟢 Monitor de ping ativo — <span id="monitor-info">verificando...</span>
+  </span>
+</div>
+<div class="row g-3">
+  {% for m in machines %}
+  <div class="col-md-4">
+    <div class="card card-machine h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start">
+          <h6 class="card-title mb-0">{{ m.hostname or m.ip }}</h6>
+          <span class="badge status-badge {{ 'badge-online' if m.status == 'online' else 'badge-offline' }}"
+                data-ip="{{ m.ip }}">
+            {{ m.status or 'desconhecido' }}
+          </span>
+        </div>
+        <p class="text-muted small mb-2">{{ m.ip }} · {{ m.os_name }}</p>
+        <ul class="list-unstyled small mb-3">
+          <li><strong>RAM:</strong> {{ m.ram_free_gb }} GB livres de {{ m.ram_total_gb }} GB</li>
+          <li><strong>CPU:</strong> {{ m.cpu }}</li>
+          <li><strong>Última atualização:</strong> {{ m.last_seen }}</li>
+        </ul>
+        <a href="{{ url_for('machine_detail', ip=m.ip) }}" class="btn btn-sm btn-outline-primary">Ver detalhes</a>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <p class="text-muted">Nenhuma máquina cadastrada ainda. Inicie uma varredura acima.</p>
+  {% endfor %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const form = document.getElementById("scan-form");
+const btn = document.getElementById("scan-btn");
+const info = document.getElementById("scan-info");
+const progressWrap = document.getElementById("scan-progress-wrap");
+const progressBar = document.getElementById("scan-progress");
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const formData = new FormData(form);
+  btn.disabled = true;
+  const resp = await fetch("/scan", { method: "POST", body: formData });
+  const data = await resp.json();
+  if (!data.ok) {
+    alert(data.msg);
+    btn.disabled = false;
+    return;
+  }
+  progressWrap.style.display = "block";
+  poll();
+});
+
+async function poll() {
+  const resp = await fetch("/scan/status");
+  const s = await resp.json();
+  const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
+  progressBar.style.width = pct + "%";
+  info.textContent = s.running
+    ? `Verificando ${s.current_ip} (${s.done}/${s.total})`
+    : "Varredura concluída.";
+  if (s.running) {
+    setTimeout(poll, 1500);
+  } else {
+    btn.disabled = false;
+    setTimeout(() => window.location.reload(), 1000);
+  }
+}
+
+// Atualiza apenas os badges de online/offline com base no monitor de ping
+// em background, sem precisar de uma nova varredura WMI nem recarregar a página.
+async function updateStatuses() {
+  try {
+    const [machinesResp, monitorResp] = await Promise.all([
+      fetch("/api/machines"),
+      fetch("/api/monitor"),
+    ]);
+    const machines = await machinesResp.json();
+    const monitorState = await monitorResp.json();
+
+    machines.forEach((m) => {
+      const badge = document.querySelector(`.status-badge[data-ip="${m.ip}"]`);
+      if (!badge) return;
+      badge.textContent = m.status || "desconhecido";
+      badge.classList.toggle("badge-online", m.status === "online");
+      badge.classList.toggle("badge-offline", m.status !== "online");
+    });
+
+    const monitorInfo = document.getElementById("monitor-info");
+    if (monitorInfo) {
+      monitorInfo.textContent = monitorState.last_check
+        ? `última checagem às ${monitorState.last_check.split("T")[1]} (${monitorState.last_check_count} máquinas)`
+        : "aguardando primeira checagem...";
+    }
+  } catch (e) {
+    // Silenciosamente ignora falhas de polling para não incomodar o usuário
+  }
+}
+
+updateStatuses();
+setInterval(updateStatuses, 10000);
+</script>
+{% endblock %}
